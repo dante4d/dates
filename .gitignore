@@ -1,3 +1,2 @@
-dotnet
-list*
-test*
+test.csx
+/test/list-*

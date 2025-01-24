@@ -33,13 +33,13 @@ record Entry {
 DateTime? getDateOnly(IXLRow row, int index) =>
     row.Cell(index).TryGetValue<DateTime>(out var value) ? value.Date : (DateTime?)null;
 
-List<Entry> loadEntries(string path) =>
-    new XLWorkbook(path)
+List<Entry> loadEntries(string folder, string list) =>
+    new XLWorkbook(Path.Combine(folder, list))
         .Worksheet(sheetNum)
         .RowsUsed()
         .Skip(skipCount)
         .Select(row => new Entry {
-            path              = row.Cell(1).GetString(),
+            path              = Path.Combine(folder, row.Cell(1).GetString()),
             // old
             oldPropsCreated   = getDateOnly(row, 2),
             oldPropsModified  = getDateOnly(row, 3),
@@ -55,7 +55,9 @@ List<Entry> loadEntries(string path) =>
         })
         .ToList();
 
-void saveEntries(string path, List<Entry> entries) {
+void saveEntries(string folder, string list, List<Entry> entries) {
+    string path = Path.Combine(folder, list);
+
     string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
     string name = $"{Path.GetFileNameWithoutExtension(path)}-{timestamp}{Path.GetExtension(path)}";
     string newPath = Path.Combine(Path.GetDirectoryName(path) ?? ".", name);
@@ -175,7 +177,18 @@ Entry process(Entry entry) {
     }
 }
 
-var entries = loadEntries("list.xlsx");
+var args = Environment.GetCommandLineArgs();
+
+string folder = args.Length > 2 ? args[2] : "test";
+
+if (!Directory.Exists(folder)) {
+    AnsiConsole.MarkupLine($"[red]Složka {folder} neexistuje.[/]");
+    return;
+}
+
+AnsiConsole.MarkupLine($"[blue]Zpracování složky {folder}...[/]");
+
+var entries = loadEntries(folder, "list.xlsx");
 var newEntries = entries.Select(process).ToList();
-saveEntries("list.xlsx", newEntries);
+saveEntries(folder, "list.xlsx", newEntries);
 AnsiConsole.MarkupLine("[green]Soubory zpracovány![/]");
