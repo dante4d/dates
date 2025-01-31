@@ -105,7 +105,6 @@ DateTime? replaceDate(DateTime? oldDateTime, DateTime? newDateTime) {
     return null;
 }
 
-// Entry processEntry(Entry entry, OpenXmlPackage doc = null) {
 Entry processEntry(Entry entry, OpenXmlPackage? doc = null) {    
     if (log) AnsiConsole.WriteLine(entry.ToString());
 
@@ -141,6 +140,10 @@ Entry processEntry(Entry entry, OpenXmlPackage? doc = null) {
         if (newEntry.newPropsModified.HasValue) props.Modified = newEntry.newPropsModified;
         doc!.Dispose();
     }
+
+    using (var stream = new FileStream(newEntry.path, FileMode.Open, FileAccess.Write, FileShare.None)) {
+        stream.Flush(true);
+    }    
 
     if (newEntry.newCreationTime.HasValue) File.SetCreationTime(newEntry.path, newEntry.newCreationTime.Value);
     if (newEntry.newLastWriteTime.HasValue) {
