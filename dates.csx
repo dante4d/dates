@@ -1,6 +1,7 @@
 #r "nuget: Spectre.Console, 0.49.2-preview.0.69"
 #r "nuget: DocumentFormat.OpenXml, 3.2.0"
 #r "nuget: ClosedXML, 0.104.2"
+#r "nuget: NPOI, 2.7.2"
 #nullable enable
 
 using System;
@@ -10,6 +11,8 @@ using System.Linq;
 using ClosedXML.Excel;
 using DocumentFormat.OpenXml.Packaging;
 using Spectre.Console;
+using NPOI.HPSF;
+using NPOI.POIFS.FileSystem;
 
 var log = true;
 
@@ -113,7 +116,7 @@ Entry processEntry(Entry entry, OpenXmlPackage? doc = null) {
     if (doc == null) AnsiConsole.MarkupLine($"[yellow]doc == null[/]");
     if (props == null) AnsiConsole.MarkupLine($"[yellow]props == null[/]");
     if (props?.Created == null) AnsiConsole.MarkupLine($"[yellow]props.Created == null[/]");
-    if (props?.Created == null) AnsiConsole.MarkupLine($"[yellow]props.Modified == null[/]");
+    if (props?.Modified == null) AnsiConsole.MarkupLine($"[yellow]props.Modified == null[/]");
 
     var oldCreationTime = File.GetCreationTime(entry.path);
     var oldLastWriteTime = File.GetLastWriteTime(entry.path);
@@ -145,28 +148,178 @@ Entry processEntry(Entry entry, OpenXmlPackage? doc = null) {
         stream.Flush(true);
     }    
 
-    if (newEntry.newCreationTime.HasValue) File.SetCreationTime(newEntry.path, newEntry.newCreationTime.Value);
+    if (newEntry.newCreationTime.HasValue) {
+        File.SetCreationTime(newEntry.path, newEntry.newCreationTime.Value);
+    }
     if (newEntry.newLastWriteTime.HasValue) {
-        if (log) AnsiConsole.MarkupLine($"[yellow]LastWriteTime == {newEntry.newLastWriteTime}[/]");
+        // if (log) AnsiConsole.MarkupLine($"[yellow]LastWriteTime == {newEntry.newLastWriteTime}[/]");
         File.SetLastWriteTime(newEntry.path, newEntry.newLastWriteTime.Value);
     }
     if (newEntry.newLastAccessTime.HasValue) {
-        if (log) AnsiConsole.MarkupLine($"[yellow]LastAccessTime == {newEntry.newLastAccessTime}[/]");
+        // if (log) AnsiConsole.MarkupLine($"[yellow]LastAccessTime == {newEntry.newLastAccessTime}[/]");
         File.SetLastAccessTime(newEntry.path, newEntry.newLastAccessTime.Value);
     }        
 
     return newEntry;
 }
 
+Entry processXlsEntry(Entry entry) {    
+    if (log) AnsiConsole.MarkupLine($"[green]Processing file: {entry.path}[/]");
+
+    if (!File.Exists(entry.path))
+    {
+        throw new Exception($"File not found: {entry.path}");
+    }
+
+    try
+    {
+        byte[] fileBytes = File.ReadAllBytes(entry.path); // ✅ Load file into memory
+        using var memStream = new MemoryStream(fileBytes);
+        
+        var system = new POIFSFileSystem(memStream); // ❌ No `using` here!
+
+        SummaryInformation? information = null;
+
+        try
+        {
+            AnsiConsole.MarkupLine("[blue]Checking for metadata entry...[/]");
+
+            if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
+            {
+                var entry2 = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
+                if (entry2 is DocumentNode node)
+                {
+                    using var input = new DocumentInputStream(node);
+                    information = (SummaryInformation) PropertySetFactory.Create(input);
+                }
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("[yellow]Metadata not found, creating new one.[/]");
+                information = PropertySetFactory.CreateSummaryInformation();
+            }
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[red]Error reading metadata: {ex.Message}[/]");
+            AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
+        }
+
+        // if (information != null)
+        // {
+        //     try
+        //     {
+        //         AnsiConsole.MarkupLine("[blue]Updating metadata...[/]");
+        //         if (entry.newPropsCreated.HasValue) information.CreateDateTime = entry.newPropsCreated.Value;
+        //         if (entry.newPropsModified.HasValue) information.LastSaveDateTime = entry.newPropsModified.Value;
+
+        //         using var output = new MemoryStream();
+        //         information.Write(output);
+        //         var bytes = output.ToArray();
+
+        //         if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
+        //         {
+        //             var existingEntry = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
+        //             if (existingEntry is EntryNode entryToRemove)
+        //             {
+        //                 system.Root.DeleteEntry(entryToRemove);
+        //             }
+        //         }
+
+        //         system.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, writable: false));
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         AnsiConsole.MarkupLine($"[red]Error updating metadata: {ex.Message}[/]");
+        //         AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
+        //     }
+        // }
+
+        if (information != null)
+        {
+            try
+            {
+                AnsiConsole.MarkupLine($"[blue]Old Created: {information.CreateDateTime}[/]");
+                AnsiConsole.MarkupLine($"[blue]Old Modified: {information.LastSaveDateTime}[/]");
+
+                if (entry.newPropsCreated.HasValue) information.CreateDateTime = entry.newPropsCreated.Value;
+                if (entry.newPropsModified.HasValue) information.LastSaveDateTime = entry.newPropsModified.Value;
+
+                AnsiConsole.MarkupLine($"[green]New Created: {information.CreateDateTime}[/]");
+                AnsiConsole.MarkupLine($"[green]New Modified: {information.LastSaveDateTime}[/]");
+
+                // using var output = new MemoryStream();
+                // information.Write(output);
+                // var bytes = output.ToArray();
+
+                // if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
+                // {
+                //     var existingEntry = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
+                //     if (existingEntry is EntryNode entryToRemove)
+                //     {
+                //         system.Root.DeleteEntry(entryToRemove);
+                //     }
+                // }
+
+                // system.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, writable: false));
+
+                using var output = new MemoryStream();
+                information.Write(output);
+                var bytes = output.ToArray();
+
+                if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
+                {
+                    var existingEntry = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
+                    if (existingEntry is EntryNode entryToRemove)
+                    {
+                        system.Root.DeleteEntry(entryToRemove);
+                    }
+                }
+
+                system.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, writable: false));
+
+                // ✅ Force write system update
+                system.WriteFileSystem(memStream);                
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[red]Error updating metadata: {ex.Message}[/]");
+                AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
+            }
+        }
+
+        try
+        {
+            AnsiConsole.MarkupLine("[blue]Writing memory copy back to disk...[/]");
+            File.WriteAllBytes(entry.path, memStream.ToArray());
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[red]Error writing file: {ex.Message}[/]");
+            AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
+        }
+
+        system.Close(); // ✅ Explicitly close POIFSFileSystem
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Fatal error: {ex.Message}[/]");
+        AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
+    }
+
+    return entry;
+}
+
 Func<Entry, Entry> getHandler(string extension) =>
     extension.ToLower() switch {
         ".docx" => (entry) => processEntry(entry, WordprocessingDocument.Open(entry.path, true)),
         ".xlsx" => (entry) => processEntry(entry, SpreadsheetDocument.Open(entry.path, true)),
+        // ".xls"  => (entry) => processXlsEntry(entry),
         _ => (entry) => processEntry(entry)
     };
 
 Entry process(Entry entry) {
-    try {
+    // try {
         AnsiConsole.MarkupLine($"[blue]Zpracovávám {entry.path}...[/]");
         var extension = Path.GetExtension(entry.path);
 
@@ -174,10 +327,10 @@ Entry process(Entry entry) {
         var newEntry = handler(entry);
 
         return newEntry;
-    } catch (Exception e) {
-        AnsiConsole.MarkupLine($"[red]Chyba: {e.Message}[/]");
-        return entry;
-    }
+    // } catch (Exception e) {
+    //     AnsiConsole.MarkupLine($"[red]Chyba: {e.Message}[/]");
+    //     return entry;
+    // }
 }
 
 var args = Environment.GetCommandLineArgs();
