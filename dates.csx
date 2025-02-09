@@ -1,350 +1,326 @@
 #r "nuget: Spectre.Console, 0.49.2-preview.0.69"
-#r "nuget: DocumentFormat.OpenXml, 3.2.0"
 #r "nuget: ClosedXML, 0.104.2"
+#r "nuget: DocumentFormat.OpenXml, 3.2.0"
 #r "nuget: NPOI, 2.7.2"
 #nullable enable
 
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using Spectre.Console;
 using ClosedXML.Excel;
 using DocumentFormat.OpenXml.Packaging;
-using Spectre.Console;
 using NPOI.HPSF;
 using NPOI.POIFS.FileSystem;
 
-var log = true;
-
-var sheetNum = 1;
-var skipCount = 3;
+record Stamps {
+    public DateTime? CreationTime { get; init; }
+    public DateTime? LastWriteTime { get; init; }
+    public DateTime? LastAccessTime { get; init; }
+    public DateTime? PropsCreated { get; init; }
+    public DateTime? PropsModified { get; init; }
+}
 
 record Entry {
-    public required string path { get; init; }
-    public DateTime? oldCreationTime   { get; init; }
-    public DateTime? oldLastWriteTime  { get; init; }
-    public DateTime? oldLastAccessTime { get; init; }
-    public DateTime? oldPropsCreated   { get; init; }
-    public DateTime? oldPropsModified  { get; init; }
-    public DateTime? newCreationTime   { get; init; }
-    public DateTime? newLastWriteTime  { get; init; }
-    public DateTime? newLastAccessTime { get; init; }
-    public DateTime? newPropsCreated   { get; init; }
-    public DateTime? newPropsModified  { get; init; }    
+    public required string Path { get; init; }
+    public Stamps? Old { get; init; }
+    public Stamps? New { get; init; }
 }
 
-DateTime? getDateOnly(IXLRow row, int index) =>
-    row.Cell(index).TryGetValue<DateTime>(out var value) ? value.Date : (DateTime?)null;
-
-List<Entry> loadEntries(string folder, string list) =>
-    new XLWorkbook(Path.Combine(folder, list))
-        .Worksheet(sheetNum)
-        .RowsUsed()
-        .Skip(skipCount)
-        .Select(row => new Entry {
-            path              = Path.Combine(folder, row.Cell(1).GetString()),
-            // old
-            oldPropsCreated   = getDateOnly(row, 2),
-            oldPropsModified  = getDateOnly(row, 3),
-            oldCreationTime   = getDateOnly(row, 4),
-            oldLastWriteTime  = getDateOnly(row, 5),
-            oldLastAccessTime = getDateOnly(row, 6),
-            // new
-            newPropsCreated   = getDateOnly(row, 7),
-            newPropsModified  = getDateOnly(row, 8),
-            newCreationTime   = getDateOnly(row, 9),
-            newLastWriteTime  = getDateOnly(row, 10),
-            newLastAccessTime = getDateOnly(row, 11)
-        })
-        .ToList();
-
-void saveEntries(string folder, string list, List<Entry> entries) {
-    string path = Path.Combine(folder, list);
-
-    string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-    string name = $"{Path.GetFileNameWithoutExtension(path)}-{timestamp}{Path.GetExtension(path)}";
-    string newPath = Path.Combine(Path.GetDirectoryName(path) ?? ".", name);
-
-    File.Copy(path, newPath);
-
-    using var workbook = new XLWorkbook(newPath);
-    var worksheet = workbook.Worksheet(sheetNum);
-
-    int index = skipCount + 1;
-    foreach (var entry in entries) {
-        var row = worksheet.Row(index++);
-
-        row.Cell(1).SetValue(entry.path);
-        // old
-        row.Cell(2).SetValue(entry.oldPropsCreated?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(3).SetValue(entry.oldPropsModified?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(4).SetValue(entry.oldCreationTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(5).SetValue(entry.oldLastWriteTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(6).SetValue(entry.oldLastAccessTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        // new
-        row.Cell(7).SetValue(entry.newPropsCreated?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(8).SetValue(entry.newPropsModified?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(9).SetValue(entry.newCreationTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(10).SetValue(entry.newLastWriteTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-        row.Cell(11).SetValue(entry.newLastAccessTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
-    }
-
-    workbook.Save();
-
-    Console.WriteLine($"Výsledek uložen do {newPath}");
+interface IHandler {
+    Stamps Read(string path);
+    void Write(string path, Stamps stamps);
 }
 
-DateTime? replaceDate(DateTime? oldDateTime, DateTime? newDateTime) {
-    if (oldDateTime.HasValue && newDateTime.HasValue) {
-        return new DateTime(
-            newDateTime.Value.Year,
-            newDateTime.Value.Month,
-            newDateTime.Value.Day,
-            oldDateTime.Value.Hour,
-            oldDateTime.Value.Minute,
-            oldDateTime.Value.Second
-        );
+class DefaultHandler : IHandler {
+    public virtual Stamps Read(string file) =>
+        new() {
+            CreationTime = File.GetCreationTime(file),
+            LastWriteTime = File.GetLastWriteTime(file),
+            LastAccessTime = File.GetLastAccessTime(file)
+        };
+
+    public virtual void Write(string file, Stamps stamps) {
+        if (stamps.CreationTime.HasValue) File.SetCreationTime(file, stamps.CreationTime.Value);
+        if (stamps.LastWriteTime.HasValue) File.SetLastWriteTime(file, stamps.LastWriteTime.Value);
+        if (stamps.LastAccessTime.HasValue) File.SetLastAccessTime(file, stamps.LastAccessTime.Value);
     }
-    return null;
 }
 
-Entry processEntry(Entry entry, OpenXmlPackage? doc = null) {    
-    if (log) AnsiConsole.WriteLine(entry.ToString());
+class XmlHandler : DefaultHandler {
+    private OpenXmlPackage Open(string file) =>
+        Path.GetExtension(file).ToLower() switch {
+            ".docx" => WordprocessingDocument.Open(file, true),
+            ".xlsx" => SpreadsheetDocument.Open(file, true),
+            _ => throw new NotSupportedException($"Unsupported file type: {file}")
+        };
 
-    var props = doc?.PackageProperties;
-
-    if (doc == null) AnsiConsole.MarkupLine($"[yellow]doc == null[/]");
-    if (props == null) AnsiConsole.MarkupLine($"[yellow]props == null[/]");
-    if (props?.Created == null) AnsiConsole.MarkupLine($"[yellow]props.Created == null[/]");
-    if (props?.Modified == null) AnsiConsole.MarkupLine($"[yellow]props.Modified == null[/]");
-
-    var oldCreationTime = File.GetCreationTime(entry.path);
-    var oldLastWriteTime = File.GetLastWriteTime(entry.path);
-    var oldLastAccessTime = File.GetLastAccessTime(entry.path);
-
-    var newEntry = entry with {
-        path = entry.path,
-        oldCreationTime   = oldCreationTime,
-        oldLastWriteTime  = oldLastWriteTime,
-        oldLastAccessTime = oldLastAccessTime,
-        oldPropsCreated   = props?.Created,
-        oldPropsModified  = props?.Modified,
-        newCreationTime   = replaceDate(oldCreationTime, entry.newCreationTime),
-        newLastWriteTime  = replaceDate(oldLastWriteTime, entry.newLastWriteTime),
-        newLastAccessTime = replaceDate(oldLastAccessTime, entry.newLastAccessTime),
-        newPropsCreated   = replaceDate(props?.Created, entry.newPropsCreated),
-        newPropsModified  = replaceDate(props?.Modified, entry.newPropsModified)
-    };
-
-    if (log) AnsiConsole.WriteLine(newEntry.ToString());
-
-    if (props != null) {
-        if (newEntry.newPropsCreated.HasValue) props.Created = newEntry.newPropsCreated;
-        if (newEntry.newPropsModified.HasValue) props.Modified = newEntry.newPropsModified;
-        doc!.Dispose();
+    public override Stamps Read(string file) {
+        try{
+            using var document = Open(file);
+            var properties = document.PackageProperties;
+            return base.Read(file) with {
+                PropsCreated = properties.Created,
+                PropsModified = properties.Modified
+            };
+        } catch (Exception ex) {
+            AnsiConsole.MarkupLine($"[red]Error reading XML metadata: {ex.Message}[/]");
+        }
+        return base.Read(file);
     }
 
-    using (var stream = new FileStream(newEntry.path, FileMode.Open, FileAccess.Write, FileShare.None)) {
-        stream.Flush(true);
-    }    
-
-    if (newEntry.newCreationTime.HasValue) {
-        File.SetCreationTime(newEntry.path, newEntry.newCreationTime.Value);
+    public override void Write(string file, Stamps stamps) {
+        try {
+            using var document = Open(file);
+            var properties = document.PackageProperties;
+            if (stamps.PropsCreated.HasValue) properties.Created = stamps.PropsCreated;
+            if (stamps.PropsModified.HasValue) properties.Modified = stamps.PropsModified;
+        } catch (Exception ex) {
+            AnsiConsole.MarkupLine($"[red]Error writing XML metadata: {ex.Message}[/]");
+        } finally {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            base.Write(file, stamps);
+        }
     }
-    if (newEntry.newLastWriteTime.HasValue) {
-        // if (log) AnsiConsole.MarkupLine($"[yellow]LastWriteTime == {newEntry.newLastWriteTime}[/]");
-        File.SetLastWriteTime(newEntry.path, newEntry.newLastWriteTime.Value);
-    }
-    if (newEntry.newLastAccessTime.HasValue) {
-        // if (log) AnsiConsole.MarkupLine($"[yellow]LastAccessTime == {newEntry.newLastAccessTime}[/]");
-        File.SetLastAccessTime(newEntry.path, newEntry.newLastAccessTime.Value);
-    }        
-
-    return newEntry;
 }
 
-Entry processXlsEntry(Entry entry) {    
-    if (log) AnsiConsole.MarkupLine($"[green]Processing file: {entry.path}[/]");
+class OleHandler : DefaultHandler {
+    public override Stamps Read(string file) {
+        try {
+            using var fs = new FileStream(file, FileMode.Open, FileAccess.Read);
+            var poifs = new POIFSFileSystem(fs);
 
-    if (!File.Exists(entry.path))
-    {
-        throw new Exception($"File not found: {entry.path}");
-    }
+            if (!poifs.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME)) {
+                AnsiConsole.MarkupLine($"[red]No SummaryInformation stream found in {file}[/]");
+            } else {
+                var summaryEntry = poifs.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
+                if (summaryEntry is not DocumentEntry documentEntry) {
+                    AnsiConsole.MarkupLine($"[red]SummaryInformation stream is not a document entry in {file}[/]");
+                } else {
+                    using var input = new DocumentInputStream(documentEntry);
+                    var summaryInfo = (SummaryInformation)PropertySetFactory.Create(input);
 
-    try
-    {
-        byte[] fileBytes = File.ReadAllBytes(entry.path); // ✅ Load file into memory
-        using var memStream = new MemoryStream(fileBytes);
-        
-        var system = new POIFSFileSystem(memStream); // ❌ No `using` here!
-
-        SummaryInformation? information = null;
-
-        try
-        {
-            AnsiConsole.MarkupLine("[blue]Checking for metadata entry...[/]");
-
-            if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
-            {
-                var entry2 = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
-                if (entry2 is DocumentNode node)
-                {
-                    using var input = new DocumentInputStream(node);
-                    information = (SummaryInformation) PropertySetFactory.Create(input);
+                    return base.Read(file) with {
+                        PropsCreated = summaryInfo.CreateDateTime,
+                        PropsModified = summaryInfo.LastSaveDateTime
+                    };
                 }
             }
-            else
-            {
-                AnsiConsole.MarkupLine("[yellow]Metadata not found, creating new one.[/]");
-                information = PropertySetFactory.CreateSummaryInformation();
-            }
+        } catch (Exception ex) {
+            AnsiConsole.MarkupLine($"[red]Error reading OLE metadata: {ex.Message}[/]");
         }
-        catch (Exception ex)
-        {
-            AnsiConsole.MarkupLine($"[red]Error reading metadata: {ex.Message}[/]");
-            AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
-        }
+        return base.Read(file);
+    }
 
-        // if (information != null)
-        // {
-        //     try
-        //     {
-        //         AnsiConsole.MarkupLine("[blue]Updating metadata...[/]");
-        //         if (entry.newPropsCreated.HasValue) information.CreateDateTime = entry.newPropsCreated.Value;
-        //         if (entry.newPropsModified.HasValue) information.LastSaveDateTime = entry.newPropsModified.Value;
+    public override void Write(string file, Stamps stamps) {
+        try {
+            using var fs = new FileStream(file, FileMode.Open, FileAccess.ReadWrite);
+            var poifs = new POIFSFileSystem(fs);
 
-        //         using var output = new MemoryStream();
-        //         information.Write(output);
-        //         var bytes = output.ToArray();
+            if (!poifs.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME)) {
+                AnsiConsole.MarkupLine($"[red]No SummaryInformation stream found in {file}[/]");
+            } else {
+                var summaryEntry = poifs.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
+                if (summaryEntry is not DocumentEntry documentEntry) {
+                    AnsiConsole.MarkupLine($"[red]SummaryInformation stream is not a document entry in {file}[/]");
+                } else {
+                    using var input = new DocumentInputStream(documentEntry);
+                    var summaryInfo = (SummaryInformation)PropertySetFactory.Create(input);
 
-        //         if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
-        //         {
-        //             var existingEntry = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
-        //             if (existingEntry is EntryNode entryToRemove)
-        //             {
-        //                 system.Root.DeleteEntry(entryToRemove);
-        //             }
-        //         }
+                    if (stamps.PropsCreated.HasValue) summaryInfo.CreateDateTime = stamps.PropsCreated.Value;
+                    if (stamps.PropsModified.HasValue) summaryInfo.LastSaveDateTime = stamps.PropsModified.Value;
 
-        //         system.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, writable: false));
-        //     }
-        //     catch (Exception ex)
-        //     {
-        //         AnsiConsole.MarkupLine($"[red]Error updating metadata: {ex.Message}[/]");
-        //         AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
-        //     }
-        // }
+                    using var output = new MemoryStream();
+                    summaryInfo.Write(output);
+                    var bytes = output.ToArray();
 
-        if (information != null)
-        {
-            try
-            {
-                AnsiConsole.MarkupLine($"[blue]Old Created: {information.CreateDateTime}[/]");
-                AnsiConsole.MarkupLine($"[blue]Old Modified: {information.LastSaveDateTime}[/]");
-
-                if (entry.newPropsCreated.HasValue) information.CreateDateTime = entry.newPropsCreated.Value;
-                if (entry.newPropsModified.HasValue) information.LastSaveDateTime = entry.newPropsModified.Value;
-
-                AnsiConsole.MarkupLine($"[green]New Created: {information.CreateDateTime}[/]");
-                AnsiConsole.MarkupLine($"[green]New Modified: {information.LastSaveDateTime}[/]");
-
-                // using var output = new MemoryStream();
-                // information.Write(output);
-                // var bytes = output.ToArray();
-
-                // if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
-                // {
-                //     var existingEntry = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
-                //     if (existingEntry is EntryNode entryToRemove)
-                //     {
-                //         system.Root.DeleteEntry(entryToRemove);
-                //     }
-                // }
-
-                // system.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, writable: false));
-
-                using var output = new MemoryStream();
-                information.Write(output);
-                var bytes = output.ToArray();
-
-                if (system.Root.HasEntry(SummaryInformation.DEFAULT_STREAM_NAME))
-                {
-                    var existingEntry = system.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME);
-                    if (existingEntry is EntryNode entryToRemove)
-                    {
-                        system.Root.DeleteEntry(entryToRemove);
+                    if (poifs.Root.GetEntry(SummaryInformation.DEFAULT_STREAM_NAME) is EntryNode entryToRemove) {
+                        poifs.Root.DeleteEntry(entryToRemove);
                     }
+
+                    poifs.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, false));
+
+                    using var outFs = new FileStream(file, FileMode.Create, FileAccess.Write);
+                    poifs.WriteFileSystem(outFs);
                 }
-
-                system.Root.CreateDocument(SummaryInformation.DEFAULT_STREAM_NAME, new MemoryStream(bytes, writable: false));
-
-                // ✅ Force write system update
-                system.WriteFileSystem(memStream);                
             }
-            catch (Exception ex)
-            {
-                AnsiConsole.MarkupLine($"[red]Error updating metadata: {ex.Message}[/]");
-                AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
-            }
+        } catch (Exception ex) {
+            AnsiConsole.MarkupLine($"[red]Error writing OLE metadata: {ex.Message}[/]");
+        } finally {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            base.Write(file, stamps);
         }
-
-        try
-        {
-            AnsiConsole.MarkupLine("[blue]Writing memory copy back to disk...[/]");
-            File.WriteAllBytes(entry.path, memStream.ToArray());
-        }
-        catch (Exception ex)
-        {
-            AnsiConsole.MarkupLine($"[red]Error writing file: {ex.Message}[/]");
-            AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
-        }
-
-        system.Close(); // ✅ Explicitly close POIFSFileSystem
     }
-    catch (Exception ex)
-    {
-        AnsiConsole.MarkupLine($"[red]Fatal error: {ex.Message}[/]");
-        AnsiConsole.MarkupLine($"[red]Stack Trace: {ex.StackTrace}[/]");
-    }
-
-    return entry;
 }
 
-Func<Entry, Entry> getHandler(string extension) =>
-    extension.ToLower() switch {
-        ".docx" => (entry) => processEntry(entry, WordprocessingDocument.Open(entry.path, true)),
-        ".xlsx" => (entry) => processEntry(entry, SpreadsheetDocument.Open(entry.path, true)),
-        // ".xls"  => (entry) => processXlsEntry(entry),
-        _ => (entry) => processEntry(entry)
+class Processor {
+    static readonly string List = "list.xlsx";
+    static readonly int SheetNum = 1;
+    static readonly int SkipLines = 3;
+
+    static readonly Dictionary<string, IHandler> Handlers = new() {
+        { ".docx", new XmlHandler() },
+        { ".xlsx", new XmlHandler() },
+        { ".xls", new OleHandler() }
     };
 
-Entry process(Entry entry) {
-    // try {
-        AnsiConsole.MarkupLine($"[blue]Zpracovávám {entry.path}...[/]");
-        var extension = Path.GetExtension(entry.path);
+    static readonly IHandler DefaultHandler = new DefaultHandler();
 
-        var handler = getHandler(extension);
-        var newEntry = handler(entry);
+    public static void Run(string[] args) {
+        var folder = args.Length > 2 ? args[2] : "test";
+        if (Directory.Exists(folder)) {
+            AnsiConsole.MarkupLine($"[blue]Processing folder {folder}...[/]");
+        } else {
+            AnsiConsole.MarkupLine($"[red]Folder {folder} does not exist.[/]");
+            return;
+        }
 
-        return newEntry;
-    // } catch (Exception e) {
-    //     AnsiConsole.MarkupLine($"[red]Chyba: {e.Message}[/]");
-    //     return entry;
-    // }
+        var file = Path.Combine(folder, List);
+
+        // load entries from file
+        AnsiConsole.MarkupLine($"[blue]Loading entries from {file}...[/]");
+        var entries = LoadEntries(file);
+
+        // read old timestamps
+        AnsiConsole.MarkupLine($"[blue]Reading old timestamps...[/]");
+        entries = ReadStamps(folder, entries);
+
+        // update timestamps (time from old to new)
+        AnsiConsole.MarkupLine($"[blue]Updating new timestamps...[/]");
+        entries = entries.Select(UpdateStamps).ToList();
+
+        // write new timestamps
+        AnsiConsole.MarkupLine($"[blue]Writing new timestamps...[/]");
+        WriteStamps(folder, entries);
+
+        // copy entries file
+        AnsiConsole.MarkupLine($"[blue]Copying entries file...[/]");
+        var newFile = CopyEntries(file);
+
+        // save entries to file
+        AnsiConsole.MarkupLine($"[blue]Saving entries to {newFile}...[/]");
+        SaveEntries(newFile, entries);
+
+        AnsiConsole.MarkupLine($"[green]Folder {folder} processed![/]");
+    }
+
+    static IHandler GetHandler(string file) =>
+        Handlers.TryGetValue(Path.GetExtension(file).ToLower(), out var handler) ? handler : DefaultHandler;
+
+    static List<Entry> ReadStamps(string folder, List<Entry> entries) =>
+        entries.Select(entry => {
+            var handler = GetHandler(entry.Path);
+            var stamps = handler.Read(Path.Combine(folder, entry.Path));
+            return entry with { Old = stamps };
+        }).ToList();
+
+    static DateTime? ReplaceDate(DateTime? oldDateTime, DateTime? newDateTime) {
+        if (oldDateTime is null || newDateTime is null) {
+            return null;
+        } else {
+            return new DateTime(
+                newDateTime.Value.Year,
+                newDateTime.Value.Month,
+                newDateTime.Value.Day,
+                oldDateTime.Value.Hour,
+                oldDateTime.Value.Minute,
+                oldDateTime.Value.Second
+            );
+        }
+
+    }
+
+    static Entry UpdateStamps(Entry entry) {
+        if (entry.Old is null || entry.New is null) {
+            return entry;
+        } else {
+            return entry with {
+                New = new () {
+                    CreationTime = ReplaceDate(entry.Old.CreationTime, entry.New.CreationTime),
+                    LastWriteTime = ReplaceDate(entry.Old.LastWriteTime, entry.New.LastWriteTime),
+                    LastAccessTime = ReplaceDate(entry.Old.LastAccessTime, entry.New.LastAccessTime),
+                    PropsCreated = ReplaceDate(entry.Old.PropsCreated, entry.New.PropsCreated),
+                    PropsModified = ReplaceDate(entry.Old.PropsModified, entry.New.PropsModified)
+                }
+            };
+        }
+    }
+
+    static void WriteStamps(string folder, List<Entry> entries) {
+        foreach (var entry in entries) {
+            if (entry.New is null) continue;
+            var handler = GetHandler(entry.Path);
+            handler.Write(Path.Combine(folder, entry.Path), entry.New);
+        }
+    }
+
+    static DateTime? GetDateTime(IXLRow row, int index) =>
+        row.Cell(index).TryGetValue<DateTime>(out var value) ? value : (DateTime?)null;
+
+    static List<Entry> LoadEntries(string file) =>
+        new XLWorkbook(file)
+            .Worksheet(SheetNum)
+            .RowsUsed()
+            .Skip(SkipLines)
+            .Select(row => new Entry {
+                Path = row.Cell(1).GetString(),
+                Old = new() {
+                    CreationTime = GetDateTime(row, 2),
+                    LastWriteTime = GetDateTime(row, 3),
+                    LastAccessTime = GetDateTime(row, 4),
+                    PropsCreated = GetDateTime(row, 5),
+                    PropsModified = GetDateTime(row, 6)
+                },
+                New = new() {
+                    CreationTime = GetDateTime(row, 7),
+                    LastWriteTime = GetDateTime(row, 8),
+                    LastAccessTime = GetDateTime(row, 9),
+                    PropsCreated = GetDateTime(row, 10),
+                    PropsModified = GetDateTime(row, 11)
+                }
+            })
+            .ToList();
+
+    static string CopyEntries(string file) {
+        var name = Path.GetFileNameWithoutExtension(file);
+        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        var extension = Path.GetExtension(file);
+        var path1 = Path.GetDirectoryName(file) ?? ".";
+        var path2 = $"{name}-{stamp}{extension}";
+        var newFile = Path.Combine(path1, path2);
+        File.Copy(file, newFile);
+        return newFile;
+    }
+
+    static void SaveEntries(string file, List<Entry> entries) {
+        using (var workbook = new XLWorkbook(file)) {
+            var worksheet = workbook.Worksheet(SheetNum);
+
+            var index = SkipLines + 1;
+            foreach (var entry in entries) {
+                var row = worksheet.Row(index++);
+
+                row.Cell(1).SetValue(entry.Path);
+                // old
+                row.Cell(2).SetValue(entry.Old?.PropsCreated?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(3).SetValue(entry.Old?.PropsModified?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(4).SetValue(entry.Old?.CreationTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(5).SetValue(entry.Old?.LastWriteTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(6).SetValue(entry.Old?.LastAccessTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                // new
+                row.Cell(7).SetValue(entry.New?.PropsCreated?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(8).SetValue(entry.New?.PropsModified?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(9).SetValue(entry.New?.CreationTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(10).SetValue(entry.New?.LastWriteTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+                row.Cell(11).SetValue(entry.New?.LastAccessTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "");
+            }
+
+            workbook.Save();
+        }
+    }
 }
 
-var args = Environment.GetCommandLineArgs();
-
-string folder = args.Length > 2 ? args[2] : "test";
-
-if (!Directory.Exists(folder)) {
-    AnsiConsole.MarkupLine($"[red]Složka {folder} neexistuje.[/]");
-    return;
-}
-
-AnsiConsole.MarkupLine($"[blue]Zpracování složky {folder}...[/]");
-
-var entries = loadEntries(folder, "list.xlsx");
-var newEntries = entries.Select(process).ToList();
-saveEntries(folder, "list.xlsx", newEntries);
-AnsiConsole.MarkupLine("[green]Soubory zpracovány![/]");
+Processor.Run(Environment.GetCommandLineArgs())
